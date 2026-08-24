@@ -1,0 +1,82 @@
+name: Cleanup Old GitHub Actions Runs
+
+on:
+  schedule:
+    # Every Sunday at 2:00 AM UTC
+    - cron: "0 2 * * 0"
+
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "Delete workflow runs older than how many days?"
+        required: true
+        type: string
+        default: "30"
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cleanup workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RETENTION_DAYS: ${{ inputs.retention_days || '30' }}
+
+        run: |
+          echo "========================================"
+          echo "GitHub Actions Cleanup"
+          echo "Repository: ${{ github.repository }}"
+          echo "Retention: $RETENTION_DAYS days"
+          echo "========================================"
+
+          CUTOFF=$(date -d "$RETENTION_DAYS days ago" +%s)
+
+          echo "Deleting runs created before:"
+          date -d "$RETENTION_DAYS days ago"
+          echo ""
+
+          gh api \
+            --paginate \
+            "/repos/${{ github.repository }}/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | [.id, .created_at, .status, .conclusion] | @tsv' |
+          while IFS=$'\t' read -r RUN_ID CREATED_AT STATUS CONCLUSION; do
+
+            CREATED_TS=$(date -d "$CREATED_AT" +%s)
+
+            if [ "$CREATED_TS" -lt "$CUTOFF" ]; then
+
+              echo "----------------------------------------"
+              echo "Run ID: $RUN_ID"
+              echo "Created: $CREATED_AT"
+              echo "Status: $STATUS"
+              echo "Conclusion: $CONCLUSION"
+
+              if [ "$STATUS" = "in_progress" ] || [ "$STATUS" = "queued" ]; then
+                echo "Skipping active run..."
+                continue
+              fi
+
+              echo "Deleting run..."
+
+              RESPONSE=$(gh api \
+                --method DELETE \
+                "/repos/${{ github.repository }}/actions/runs/$RUN_ID" \
+                --silent 2>&1) || {
+                  echo "FAILED to delete run $RUN_ID"
+                  echo "$RESPONSE"
+                  continue
+                }
+
+              echo "Successfully deleted run $RUN_ID"
+            fi
+
+          done
+
+          echo ""
+          echo "========================================"
+          echo "Cleanup completed"
+          echo "========================================"
