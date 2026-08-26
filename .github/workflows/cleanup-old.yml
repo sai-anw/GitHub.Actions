@@ -1,17 +1,13 @@
 name: Cleanup Old GitHub Actions Runs
 
 on:
-  schedule:
-    # Every Sunday at 2:00 AM UTC
-    - cron: "0 2 * * 0"
-
   workflow_dispatch:
     inputs:
       retention_days:
-        description: "Delete workflow runs older than how many days?"
+        description: "Delete runs older than how many days?"
         required: true
         type: string
-        default: "30"
+        default: "45"
 
 permissions:
   actions: write
@@ -21,62 +17,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Cleanup workflow runs
+      - name: Delete old workflow runs
         env:
           GH_TOKEN: ${{ github.token }}
-          RETENTION_DAYS: ${{ inputs.retention_days || '30' }}
+          DAYS: ${{ inputs.retention_days }}
+          REPO: ${{ github.repository }}
 
         run: |
-          echo "========================================"
-          echo "GitHub Actions Cleanup"
-          echo "Repository: ${{ github.repository }}"
-          echo "Retention: $RETENTION_DAYS days"
-          echo "========================================"
+          CUTOFF=$(date -u -d "$DAYS days ago" +%Y-%m-%d)
 
-          CUTOFF=$(date -d "$RETENTION_DAYS days ago" +%s)
+          echo "Deleting runs older than $DAYS days..."
+          echo "Cutoff: $CUTOFF"
 
-          echo "Deleting runs created before:"
-          date -d "$RETENTION_DAYS days ago"
-          echo ""
+          while true; do
 
-          gh api \
-            --paginate \
-            "/repos/${{ github.repository }}/actions/runs?per_page=100" \
-            --jq '.workflow_runs[] | [.id, .created_at, .status, .conclusion] | @tsv' |
-          while IFS=$'\t' read -r RUN_ID CREATED_AT STATUS CONCLUSION; do
+            gh api \
+              "/repos/$REPO/actions/runs?created=%3C$CUTOFF&status=completed&per_page=25" \
+              --jq '.workflow_runs[].id' > /tmp/runs
 
-            CREATED_TS=$(date -d "$CREATED_AT" +%s)
+            COUNT=$(wc -l < /tmp/runs)
 
-            if [ "$CREATED_TS" -lt "$CUTOFF" ]; then
+            echo "Found $COUNT runs"
 
-              echo "----------------------------------------"
-              echo "Run ID: $RUN_ID"
-              echo "Created: $CREATED_AT"
-              echo "Status: $STATUS"
-              echo "Conclusion: $CONCLUSION"
+            [ "$COUNT" -eq 0 ] && break
 
-              if [ "$STATUS" = "in_progress" ] || [ "$STATUS" = "queued" ]; then
-                echo "Skipping active run..."
-                continue
-              fi
+            while read -r ID; do
+              echo "Deleting run $ID"
+              gh api --method DELETE \
+                "/repos/$REPO/actions/runs/$ID"
+            done < /tmp/runs
 
-              echo "Deleting run..."
-
-              RESPONSE=$(gh api \
-                --method DELETE \
-                "/repos/${{ github.repository }}/actions/runs/$RUN_ID" \
-                --silent 2>&1) || {
-                  echo "FAILED to delete run $RUN_ID"
-                  echo "$RESPONSE"
-                  continue
-                }
-
-              echo "Successfully deleted run $RUN_ID"
-            fi
-
+            sleep 2
           done
 
-          echo ""
-          echo "========================================"
-          echo "Cleanup completed"
-          echo "========================================"
+          echo "Cleanup completed."
